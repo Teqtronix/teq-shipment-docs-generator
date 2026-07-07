@@ -8,6 +8,7 @@ hiddenimports = (
     + collect_submodules("customtkinter")
     + collect_submodules("pypdfium2")
     + collect_submodules("reportlab")
+    + collect_submodules("reportlab.graphics.barcode")
 )
 
 datas = [
