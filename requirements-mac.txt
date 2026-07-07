@@ -1,0 +1,8 @@
+customtkinter
+tkinterdnd2
+pandas
+openpyxl
+pillow
+pypdfium2
+reportlab
+pyinstaller
