@@ -1213,8 +1213,8 @@ def _extract_indigo_po_items(input_file):
         try:
             inner_packs = Decimal(match.group("inner").replace(",", ""))
             case_pack = Decimal(match.group("case").replace(",", ""))
-            inner_qty = (case_pack / inner_packs).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        except (InvalidOperation, ZeroDivisionError):
+            inner_qty = inner_packs.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        except InvalidOperation:
             return None, f"Invalid inner-pack/case-pack quantity near Indigo line {match.group('line')}."
 
         if inner_qty == inner_qty.to_integral_value():
