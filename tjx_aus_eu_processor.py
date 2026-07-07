@@ -1190,55 +1190,29 @@ def _format_number(value):
 def _extract_indigo_po_items(input_file):
     input_file = Path(input_file)
     parser_errors = []
-    text = ""
+    pages_text = []
     try:
         import pypdfium2 as pdfium
         pdf = pdfium.PdfDocument(str(input_file))
-        page_text = []
         for page in pdf:
             textpage = page.get_textpage()
-            page_text.append(textpage.get_text_range() or "")
-        text = "\n".join(page_text)
+            pages_text.append(textpage.get_text_range() or "")
     except Exception as exc:
         parser_errors.append(f"pypdfium2: {exc}")
 
+    text = "\n".join(pages_text)
     if not text.strip():
         details = "; ".join(parser_errors) if parser_errors else "no text extracted"
         return None, f"Unable to read Indigo PDF text ({details})."
 
-    po_match = re.search(r"\b(4\d{9})\b", text)
-    po_number = po_match.group(1) if po_match else input_file.stem
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    def _po_from_text(page_text, fallback=""):
+        po_matches = re.findall(r"\b(4\d{9})\b", page_text)
+        return po_matches[-1] if po_matches else fallback
 
-    items = []
-    line_pattern = re.compile(
-        r"^(?P<line>\d{5})\s+"
-        r"(?P<upc>\d{11,14})\s+"
-        r"(?P<description>.+?)\s+"
-        r"(?P<qty>[\d,]+(?:\.\d+)?)\s+"
-        r"(?P<uom>[A-Za-z]+)\s+"
-        r"(?P<price>[\d,]+(?:\.\d+)?)\s+"
-        r"(?P<amount>[\d,]+(?:\.\d+)?)$"
-    )
-
-    for index, line in enumerate(lines):
-        match = line_pattern.match(line)
-        if not match:
-            continue
-
-        window = "\n".join(lines[index + 1:index + 12])
-        inner_match = re.search(r"#\s*of\s*Inner\s*Packs:\s*([\d,]+(?:\.\d+)?)", window, re.IGNORECASE)
-        case_match = re.search(r"Case\s*Pack\s*Qty:\s*([\d,]+(?:\.\d+)?)", window, re.IGNORECASE)
-        part_match = re.search(r"Part\s*#:\s*([A-Za-z0-9_-]+)", window, re.IGNORECASE)
-
-        if not inner_match or not case_match:
-            return None, f"Missing inner-pack or case-pack quantity near Indigo line {match.group('line')}."
-        if not part_match:
-            return None, f"Missing Manufacturer Part # near Indigo line {match.group('line')}."
-
+    def _make_indigo_item(match, po):
         try:
-            inner_packs = Decimal(inner_match.group(1).replace(",", ""))
-            case_pack = Decimal(case_match.group(1).replace(",", ""))
+            inner_packs = Decimal(match.group("inner").replace(",", ""))
+            case_pack = Decimal(match.group("case").replace(",", ""))
             inner_qty = (case_pack / inner_packs).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         except (InvalidOperation, ZeroDivisionError):
             return None, f"Invalid inner-pack/case-pack quantity near Indigo line {match.group('line')}."
@@ -1248,97 +1222,52 @@ def _extract_indigo_po_items(input_file):
         else:
             inner_qty_value = float(inner_qty)
 
-        items.append({
-            "po": po_number,
+        description = re.sub(r"\s+", " ", _clean_text(match.group("description")))
+        sku = re.sub(r"\s+", "", _clean_text(match.group("sku")))
+        if not sku:
+            return None, f"Missing Manufacturer Part # near Indigo line {match.group('line')}."
+
+        return {
+            "po": po,
             "line": match.group("line"),
             "upc": match.group("upc"),
-            "description": _clean_text(match.group("description")),
+            "description": description,
             "order_qty": _format_number(match.group("qty")),
-            "uom": match.group("uom"),
+            "uom": _clean_text(match.groupdict().get("uom", "")),
             "case_pack_qty": _format_number(case_pack),
             "inner_packs": _format_number(inner_packs),
             "inner_qty": inner_qty_value,
-            "sku": part_match.group(1).strip(),
-        })
+            "sku": sku,
+        }, None
 
-    if not items:
-        compact_pattern = re.compile(
-            r"(?P<line>\d{5})\s+"
-            r"(?P<upc>\d{11,14})\s+"
-            r"(?P<description>[^\r\n]+?)\s*[\r\n]+"
-            r"#\s*of\s*Inner\s*Packs:\s*(?P<inner>[\d,]+(?:\.\d+)?)\s*[\r\n]+"
-            r"Case\s*Pack\s*Qty:\s*(?P<case>[\d,]+(?:\.\d+)?).*?"
-            r"(?P<qty>[\d,]+(?:\.\d+)?)\s*[\r\n]+"
-            r"Manufacturer's\s+Part\s*#:\s*(?P<sku>[A-Za-z0-9_-]+)",
-            re.IGNORECASE | re.DOTALL,
-        )
-        for match in compact_pattern.finditer(text):
-            try:
-                inner_packs = Decimal(match.group("inner").replace(",", ""))
-                case_pack = Decimal(match.group("case").replace(",", ""))
-                inner_qty = (case_pack / inner_packs).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            except (InvalidOperation, ZeroDivisionError):
-                return None, f"Invalid inner-pack/case-pack quantity near Indigo line {match.group('line')}."
+    item_pattern = re.compile(
+        r"(?P<line>\d{5})\s+"
+        r"(?P<upc>\d{11,14})\s+"
+        r"(?P<description>.*?)"
+        r"#\s*of\s*Inner\s*Packs:\s*(?P<inner>[\d,]+(?:\.\d+)?).*?"
+        r"Case\s*Pack\s*Qty:\s*(?P<case>[\d,]+(?:\.\d+)?).*?"
+        r"Pack\s*UOM:\s*(?P<uom>[A-Za-z]+).*?"
+        r"(?P<qty>[\d,]+(?:\.\d+)?)\s*[\r\n]+"
+        r"Manufacturer's\s+Part\s*#:\s*(?P<sku>[A-Za-z0-9_ -]+?)(?=\s+Resale\s+Price:)",
+        re.IGNORECASE | re.DOTALL,
+    )
 
-            if inner_qty == inner_qty.to_integral_value():
-                inner_qty_value = int(inner_qty)
-            else:
-                inner_qty_value = float(inner_qty)
-
-            items.append({
-                "po": po_number,
-                "line": match.group("line"),
-                "upc": match.group("upc"),
-                "description": _clean_text(match.group("description")),
-                "order_qty": _format_number(match.group("qty")),
-                "uom": "",
-                "case_pack_qty": _format_number(case_pack),
-                "inner_packs": _format_number(inner_packs),
-                "inner_qty": inner_qty_value,
-                "sku": match.group("sku").strip(),
-            })
-
-    if not items:
-        block_pattern = re.compile(
-            r"Line\s*#\s*(?P<line>\d{5}).*?"
-            r"UPC\s*#\s*(?P<upc>\d{11,14}).*?"
-            r"Description\s*(?P<description>[^\r\n]+).*?"
-            r"#\s*of\s*Inner\s*Packs:\s*(?P<inner>[\d,]+(?:\.\d+)?).*?"
-            r"Case\s*Pack\s*Qty:\s*(?P<case>[\d,]+(?:\.\d+)?).*?"
-            r"Qty\s+UOM\s+Price\s+Amount.*?"
-            r"(?P<uom>[A-Za-z]+)\s+[\d,]+(?:\.\d+)?\s+[\d,]+(?:\.\d+)?\s+"
-            r"(?P<qty>[\d,]+(?:\.\d+)?)\s+Manufacturer's\s+Part\s*#:\s*(?P<sku>[A-Za-z0-9_-]+)",
-            re.IGNORECASE | re.DOTALL,
-        )
-        for match in block_pattern.finditer(text):
-            try:
-                inner_packs = Decimal(match.group("inner").replace(",", ""))
-                case_pack = Decimal(match.group("case").replace(",", ""))
-                inner_qty = (case_pack / inner_packs).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            except (InvalidOperation, ZeroDivisionError):
-                return None, f"Invalid inner-pack/case-pack quantity near Indigo line {match.group('line')}."
-
-            if inner_qty == inner_qty.to_integral_value():
-                inner_qty_value = int(inner_qty)
-            else:
-                inner_qty_value = float(inner_qty)
-
-            items.append({
-                "po": po_number,
-                "line": match.group("line"),
-                "upc": match.group("upc"),
-                "description": _clean_text(match.group("description")),
-                "order_qty": _format_number(match.group("qty")),
-                "uom": match.group("uom"),
-                "case_pack_qty": _format_number(case_pack),
-                "inner_packs": _format_number(inner_packs),
-                "inner_qty": inner_qty_value,
-                "sku": match.group("sku").strip(),
-            })
+    items = []
+    current_po = ""
+    for page_text in pages_text:
+        current_po = _po_from_text(page_text, current_po)
+        for match in item_pattern.finditer(page_text):
+            if not current_po:
+                return None, f"Could not identify Indigo PO for line {match.group('line')}."
+            item, error = _make_indigo_item(match, current_po)
+            if error:
+                return None, error
+            items.append(item)
 
     if not items:
         return None, "No Indigo line items were found in the PDF."
-    return {"po": po_number, "items": items}, None
+    po_numbers = sorted({item["po"] for item in items})
+    return {"po": po_numbers[0] if len(po_numbers) == 1 else "", "po_numbers": po_numbers, "items": items}, None
 
 
 def _fit_text_lines(canvas_obj, text, max_width, font_name, font_size, max_lines=2):
@@ -1467,22 +1396,20 @@ def process_indigo_pdf_file(input_file, output_dir=None, progress_callback=None,
 
     input_file = Path(input_file)
     output_dir = Path(output_dir) if output_dir else Path.cwd()
-    po = _safe_path_token(parsed["po"], "Indigo_PO")
-    shipment_dir = output_dir / f"Indigo PO {po}"
-    labels_dir = shipment_dir / "Inner Carton Labels"
-    labels_dir.mkdir(parents=True, exist_ok=True)
-
     generated = []
     items = parsed["items"]
     for index, item in enumerate(items, start=1):
         _check_cancel(cancel_event)
+        po = _safe_path_token(item["po"], "Indigo_PO")
+        po_dir = output_dir / f"Indigo PO {po}"
+        po_dir.mkdir(parents=True, exist_ok=True)
         if progress_callback:
             progress_callback(
                 0.20 + (0.70 * (index - 1) / max(len(items), 1)),
-                f"Generating Indigo inner labels {index}/{len(items)}: {item['sku']}"
+                f"Generating Indigo inner labels {index}/{len(items)}: PO {item['po']} {item['sku']}"
             )
         safe_sku = _safe_path_token(item["sku"], f"SKU_{index}")
-        output_path = labels_dir / f"Indigo PO {po} {safe_sku} Inner Carton Labels.pdf"
+        output_path = po_dir / f"Indigo PO {po} {safe_sku} Inner Carton Labels.pdf"
         success, message = _write_indigo_sku_label_pdf(output_path, item, cancel_event=cancel_event)
         if not success:
             return False, message, None
@@ -1492,8 +1419,8 @@ def process_indigo_pdf_file(input_file, output_dir=None, progress_callback=None,
         progress_callback(0.95, "Indigo labels complete.")
     return (
         True,
-        f"Successfully generated {len(generated)} Indigo inner-carton label PDF(s) from PO {parsed['po']}.",
-        str(shipment_dir),
+        f"Successfully generated {len(generated)} Indigo inner-carton label PDF(s) across {len(parsed.get('po_numbers', []))} PO folder(s).",
+        str(output_dir),
     )
 
 
