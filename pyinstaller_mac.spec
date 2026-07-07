@@ -7,19 +7,7 @@ hiddenimports = (
     + collect_submodules("tkinterdnd2")
     + collect_submodules("customtkinter")
     + collect_submodules("pypdfium2")
-    + [
-        "reportlab.graphics.renderPDF",
-        "reportlab.graphics.barcode",
-        "reportlab.graphics.barcode.common",
-        "reportlab.graphics.barcode.code128",
-        "reportlab.graphics.barcode.eanbc",
-        "reportlab.graphics.shapes",
-        "reportlab.pdfgen.canvas",
-        "reportlab.pdfbase.pdfdoc",
-        "reportlab.pdfbase.ttfonts",
-        "reportlab.lib.pagesizes",
-        "reportlab.lib.units",
-    ]
+    + collect_submodules("reportlab")
 )
 
 datas = [
@@ -47,22 +35,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        "IPython",
-        "jedi",
-        "matplotlib",
-        "scipy",
-        "PyQt5",
-        "PyQt6",
-        "PySide2",
-        "PySide6",
-        "pytest",
-        "tests",
-        "pandas.tests",
-        "numpy.tests",
-        "pdfplumber",
-        "pdfminer",
-    ],
+    excludes=[],
     noarchive=False,
     optimize=0,
 )
